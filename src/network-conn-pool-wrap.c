@@ -67,9 +67,10 @@ network_mysqld_con_idle_handle(int event_fd, short events, void *user_data)
          */
         if (ioctlsocket(event_fd, FIONREAD, &b)) {
             g_critical("ioctl(%d, FIONREAD) failed: %s", event_fd, g_strerror(errno));
-        } else if (b != 0) {
-            g_critical("ioctl(%d, FIONREAD) said something to read, oops: %d", event_fd, b);
         } else {
+            if (b != 0) {
+                g_critical("ioctl(%d, FIONREAD) said something to read, oops: %d", event_fd, b);
+            }
             /* the server decided the close the connection (wait_timeout, crash, ... )
              *
              * remove us from the connection pool and close the connection */
@@ -80,7 +81,7 @@ network_mysqld_con_idle_handle(int event_fd, short events, void *user_data)
                 srv->complement_conn_flag = 1;
             }
 
-            g_message("%s:the server decided to close the connection:%d for sock:%p",
+            g_debug("%s:the server decided to close the connection:%d for sock:%p",
                     G_STRLOC, pool_entry->pool->cur_idle_connections, pool_entry->sock);
         }
     } else if (events == EV_TIMEOUT) {
@@ -89,7 +90,7 @@ network_mysqld_con_idle_handle(int event_fd, short events, void *user_data)
             srv->complement_conn_flag = 1;
         }
         network_connection_pool_remove(pool_entry);
-        g_message("%s:idle connection timeout:%d for sock:%p", G_STRLOC,
+        g_debug("%s:idle connection timeout:%d for sock:%p", G_STRLOC,
                 pool_entry->pool->cur_idle_connections, pool_entry->sock);
     }
 }
@@ -245,6 +246,7 @@ network_pool_add_conn(network_mysqld_con *con, int is_swap)
 
         g_ptr_array_free(con->servers, TRUE);
         con->servers = NULL;
+        con->multiple_server_mode = 0;
 
         if (st->backend_ndx_array) {
             g_free(st->backend_ndx_array);

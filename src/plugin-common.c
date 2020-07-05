@@ -236,8 +236,13 @@ do_read_auth(network_mysqld_con *con)
 
     const char *client_charset = charset_get_name(auth->charset);
     if (client_charset == NULL) {
-        client_charset = con->srv->default_charset;
-        auth->charset = charset_get_number(client_charset);
+        g_message("%s: client charset is nil, orig charset num:%d", G_STRLOC, auth->charset);
+        char *err_msg = g_strdup_printf("client charset is not supported");
+        network_mysqld_con_send_error_full(recv_sock, L(err_msg), 1045, "28000");
+        log_sql_connect(con, err_msg);
+        g_free(err_msg);
+        con->state = ST_SEND_ERROR;
+        return NETWORK_SOCKET_SUCCESS;
     }
 
     recv_sock->charset_code = auth->charset;
@@ -426,7 +431,7 @@ do_connect_cetus(network_mysqld_con *con, network_backend_t **backend, int *back
 
     network_mysqld_auth_challenge_set_challenge(challenge);
     challenge->server_status |= SERVER_STATUS_AUTOCOMMIT;
-    challenge->charset = 0xC0;
+    challenge->charset = charset_get_number(con->srv->default_charset);
     GString *version = g_string_new("");
     network_backends_server_version(g->backends, version);
     challenge->server_version_str = version->str;
@@ -565,7 +570,6 @@ try_to_get_resp_from_query_cache(network_mysqld_con *con)
             g_string_append_len(dup_packet, S(packet));
             network_queue_append(con->client->send_queue, dup_packet);
             g_debug("%s:read packet len:%d from cache", G_STRLOC, (int)dup_packet->len);
-            g_debug_hexdump(G_STRLOC, S(dup_packet));
         }
         con->state = ST_SEND_QUERY_RESULT;
         con->client->do_query_cache = 0;

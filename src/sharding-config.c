@@ -652,6 +652,7 @@ struct code_map_t {
     {"INT", SHARD_DATA_TYPE_INT},
     {"CHAR", SHARD_DATA_TYPE_STR},
     {"STR", SHARD_DATA_TYPE_STR},
+    {"STRING", SHARD_DATA_TYPE_STR},
     {"DATE", SHARD_DATA_TYPE_DATE},
     {"DATETIME", SHARD_DATA_TYPE_DATETIME},
 };
@@ -713,7 +714,7 @@ parse_partitions(cJSON *root, const sharding_vdb_t *vdb, GPtrArray *partitions /
             break;
         case cJSON_Number:     /* range > 123 */
             item = sharding_partition_new(cur->string, vdb);
-            item->value = (void *)(uint64_t)cur->valueint;
+            item->value = (void *)(uint64_t)cur->valuedouble;
             g_ptr_array_add(partitions, item);
             break;
         case cJSON_String:     /* range > "str" */

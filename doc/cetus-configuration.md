@@ -157,7 +157,7 @@ Default: : 2 (seconds)
 
 连接Proxy的超时时间
 
-> proxy-connect-timeout = 1
+> proxy-connect-timeout = 2
 
 ### proxy-read-timeout
 
@@ -165,7 +165,7 @@ Default: : 600 (seconds)
 
 读Proxy的超时时间
 
-> proxy-read-timeout = 1
+> proxy-read-timeout = 600
 
 ### proxy-write-timeout
 
@@ -173,7 +173,7 @@ Default: : 600 (seconds)
 
 写Proxy的超时时间
 
-> proxy-write-timeout = 1
+> proxy-write-timeout = 600
 
 ### default-username
 
@@ -223,11 +223,7 @@ Default: 10485760 (10MB)
 
 ### master-preferred
 
-`可在Admin模块中动态更改`
-
-Proxy在读写分离时可以指定访问的库
-
-参数未设置时，没有限制；设置为true时仅访问读写后端(主库)，除非利用注释强制走从库
+设置为true时仅访问读写后端(主库)，除非利用注释强制走从库
 
 > master-preferred = true
 
@@ -257,12 +253,12 @@ Default: false
 
 > enable-client-found-rows = true
 
-### worker_id
+### worker-id
 
 只针对分库版本有效
 不同cetus实例的id号必须是不一样，否则容易有冲突
 
-> worker_id = 1
+> worker-id = 1
 
 ## Admin配置
 
@@ -375,6 +371,8 @@ replace into `objects` values ("users", '{"users":[{"user": "ght","client_pwd":"
 >  `start_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 > 
 >  PRIMARY KEY (`id`)
+> 
+> )
 
 该表中的`id`字段记录了Cetus插件监听的IP/PORT，`data`字段记录了插件名称，`start_time`字段则记录了插件的启动时间。例如启动Cetus后，表中数据可能类似下面所示：
 
@@ -407,7 +405,7 @@ mysql> select * from services;
 
 - 启动命令类似如下：
 
-> /home/ght/cetus_install/libexec/cetus --remote-conf-url=mysql://ght:123456@172.17.0.1:3306/test
+> /home/ght/cetus_install/bin/cetus --remote-conf-url=mysql://ght:123456@172.17.0.1:3306/test
  
 ### 重新load配置
 当配置中心的某些配置需要修改，而需要Cetus重新加载修改后的配置时候，并不需要重新启动Cetus，Cetus的admin端口提供了重新读取配置中心配置信息的功能。

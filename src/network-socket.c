@@ -159,7 +159,6 @@ network_socket_free(network_socket *s)
     network_address_free(s->src);
 
     if (s->event.ev_base) {     /* if .ev_base isn't set, the event never got added */
-        g_debug("%s:event del, ev:%p", G_STRLOC, &(s->event));
         event_del(&(s->event));
     }
 #ifdef HAVE_OPENSSL
@@ -282,6 +281,18 @@ network_socket_connect_setopts(network_socket *sock)
     val = 1;
     if (setsockopt(sock->fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) != 0) {
         g_critical("%s: setsockopt SO_KEEPALIVE failed: %s (%d)", G_STRLOC, g_strerror(errno), errno);
+    }
+    val = 30;
+    if (setsockopt(sock->fd, SOL_TCP, TCP_KEEPIDLE, &val, sizeof(val)) != 0) {
+        g_critical("%s: setsockopt TCP_KEEPIDLE failed: %s (%d)", G_STRLOC, g_strerror(errno), errno);
+    }
+    val = 5;
+    if (setsockopt(sock->fd, SOL_TCP, TCP_KEEPINTVL, &val, sizeof(val)) != 0) {
+        g_critical("%s: setsockopt TCP_KEEPINTVL failed: %s (%d)", G_STRLOC, g_strerror(errno), errno);
+    }
+    val = 3;
+    if (setsockopt(sock->fd, SOL_TCP, TCP_KEEPCNT, &val, sizeof(val)) != 0) {
+        g_critical("%s: setsockopt TCP_KEEPCNT failed: %s (%d)", G_STRLOC, g_strerror(errno), errno);
     }
 
     /* 

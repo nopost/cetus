@@ -784,8 +784,8 @@ static GString* network_mysqld_get_compressed_packet(network_socket* sock)
         return NULL;
     GString *compressed_packet = g_string_sized_new(16384);
     network_mysqld_proto_append_packet_len(compressed_packet, 0);
-    network_mysqld_proto_append_packet_id(compressed_packet, sock->compressed_packet_id);
     sock->compressed_packet_id++;
+    network_mysqld_proto_append_packet_id(compressed_packet, sock->compressed_packet_id);
     network_mysqld_proto_append_packet_len(compressed_packet, 0);
 
     z_stream strm;
@@ -885,44 +885,52 @@ network_mysqld_con_get_uncompressed_packet(chassis *chas, network_socket *con)
         src_queue = con->recv_queue_decrypted_raw;
     }
 #endif
-    /* read the packet len if the leading packet */
-    if (!network_queue_peek_str(src_queue, header_length, &header)) {
-        /* too small */
-        return NETWORK_SOCKET_WAIT_FOR_EVENT;
-    }
-
-    packet_len = network_mysqld_proto_get_packet_len(&header);
-    if (packet_len > chas->cetus_max_allowed_packet) {
-        g_message("packet len: %d excess max_allowed_packet: %d", packet_len, chas->cetus_max_allowed_packet);
-        return NETWORK_SOCKET_ERROR;
-    }
-
-    /* move the packet from the raw queue to the recv-queue */
-    if ((packet = network_queue_pop_str(src_queue, packet_len + NET_HEADER_SIZE + COMP_HEADER_SIZE, NULL))) {
-#if NETWORK_DEBUG_TRACE_IO
-        g_debug("%s:output for sock:%p", G_STRLOC, con);
-        /* to trace the data we received from the socket, enable this */
-        g_debug_hexdump(G_STRLOC, S(packet));
-#endif
-        unsigned char *info = (unsigned char *)packet->str + NET_HEADER_SIZE;
-        int uncompressed_len = (info[0]) | (info[1] << 8) | (info[2] << 16);
-        g_debug("%s: do uncompress here, com len:%d, uncompress len:%d", G_STRLOC, packet_len, uncompressed_len);
-
-        GString *uncompressed_packet;
-        if (uncompressed_len == 0) {
-            uncompressed_len = packet_len;
-            uncompressed_packet = g_string_sized_new(calculate_alloc_len(uncompressed_len));
-            g_string_append_len(uncompressed_packet, (char *)(info + COMP_HEADER_SIZE), uncompressed_len);
-        } else {
-            uncompressed_packet = g_string_sized_new(calculate_alloc_len(uncompressed_len));
-            cetus_uncompress(uncompressed_packet, (unsigned char *)packet->str + header_length, packet_len);
-            g_debug("%s:call cetus_uncompress for con:%p", G_STRLOC, con);
+    while(true) {
+       header.len = 0;
+        /* read the packet len if the leading packet */
+        if (!network_queue_peek_str(src_queue, header_length, &header)) {
+            /* too small */
+            g_debug("%s:network_queue_peek_str wait for event for sock:%p", G_STRLOC, con);
+            return NETWORK_SOCKET_WAIT_FOR_EVENT;
         }
 
-        network_queue_append(con->recv_queue_uncompress_raw, uncompressed_packet);
-        g_string_free(packet, TRUE);
-    } else {
-        return NETWORK_SOCKET_WAIT_FOR_EVENT;
+        packet_len = network_mysqld_proto_get_packet_len(&header);
+        if (packet_len > chas->cetus_max_allowed_packet) {
+            g_message("packet len: %d excess max_allowed_packet: %d", packet_len, chas->cetus_max_allowed_packet);
+            return NETWORK_SOCKET_ERROR;
+        }
+
+        /* move the packet from the raw queue to the recv-queue */
+        if ((packet = network_queue_pop_str(src_queue, packet_len + NET_HEADER_SIZE + COMP_HEADER_SIZE, NULL))) {
+#if NETWORK_DEBUG_TRACE_IO
+            g_debug("%s:output for sock:%p", G_STRLOC, con);
+            /* to trace the data we received from the socket, enable this */
+            g_debug_hexdump(G_STRLOC, S(packet));
+#endif
+            unsigned char *info = (unsigned char *)packet->str + NET_HEADER_SIZE;
+            int uncompressed_len = (info[0]) | (info[1] << 8) | (info[2] << 16);
+            con->compressed_packet_id = info[-1];
+            g_debug("%s: do uncompress here, com len:%d, uncompress len:%d", G_STRLOC, packet_len, uncompressed_len);
+
+            GString *uncompressed_packet;
+            if (uncompressed_len == 0) {
+                uncompressed_len = packet_len;
+                uncompressed_packet = g_string_sized_new(calculate_alloc_len(uncompressed_len));
+                g_string_append_len(uncompressed_packet, (char *)(info + COMP_HEADER_SIZE), uncompressed_len);
+            } else {
+                uncompressed_packet = g_string_sized_new(calculate_alloc_len(uncompressed_len));
+                int ret = cetus_uncompress(uncompressed_packet, (unsigned char *)packet->str + header_length, packet_len);
+                if (ret != Z_OK) {
+                    g_critical("%s:cetus_uncompress error for con:%p, ret:%d", G_STRLOC, con, ret);
+                }
+                g_debug("%s:call cetus_uncompress for con:%p", G_STRLOC, con);
+            }
+
+            network_queue_append(con->recv_queue_uncompress_raw, uncompressed_packet);
+            g_string_free(packet, TRUE);
+        } else {
+            return NETWORK_SOCKET_WAIT_FOR_EVENT;
+        }
     }
 
     return NETWORK_SOCKET_SUCCESS;
@@ -1055,10 +1063,8 @@ network_mysqld_read_mul_packets(chassis G_GNUC_UNUSED *chas,
     }
 
     if (server->do_compress) {
-        ret = network_mysqld_con_get_uncompressed_packet(chas, server);
-        if (ret == NETWORK_SOCKET_SUCCESS) {
-            ret = network_mysqld_con_get_packet(chas, server);
-        }
+        network_mysqld_con_get_uncompressed_packet(chas, server);
+        ret = network_mysqld_con_get_packet(chas, server);
     } else {
         ret = network_mysqld_con_get_packet(chas, server);
     }
@@ -1095,12 +1101,7 @@ network_mysqld_read_mul_packets(chassis G_GNUC_UNUSED *chas,
         ret = network_mysqld_con_get_packet(chas, server);
 
         if (ret == NETWORK_SOCKET_WAIT_FOR_EVENT) {
-            if (server->do_compress) {
-                ret = network_mysqld_con_get_uncompressed_packet(chas, server);
-                if (ret != NETWORK_SOCKET_SUCCESS) {
-                    break;
-                }
-            }
+            break;
         }
     }
 
@@ -1155,12 +1156,7 @@ network_mysqld_read(chassis G_GNUC_UNUSED *chas, network_socket *sock)
     }
 #endif
     if (sock->do_compress) {
-        int ret = network_mysqld_con_get_uncompressed_packet(chas, sock);
-        if (ret != NETWORK_SOCKET_SUCCESS) {
-            if (sock->recv_queue_uncompress_raw->len == 0) {
-                return ret;
-            }
-        }
+        network_mysqld_con_get_uncompressed_packet(chas, sock);
     }
 
     return network_mysqld_con_get_packet(chas, sock);
@@ -1170,7 +1166,9 @@ network_socket_retval_t
 network_mysqld_write(network_socket *sock)
 {
     if (sock->do_compress) {
-        network_mysqld_con_compress_all_packets(sock);
+        if (!sock->write_uncomplete) {
+            network_mysqld_con_compress_all_packets(sock);
+        }
     }
     network_socket_retval_t ret;
 #ifdef HAVE_OPENSSL
@@ -2268,7 +2266,6 @@ normal_result_merge(network_mysqld_con *con)
             if (con->candidate_tcp_streamed) {
                 g_critical("%s: tcp streamed resultset_merge failed for con:%p", G_STRLOC, con);
             }
-            g_debug_hexdump(G_STRLOC, S(con->orig_sql));
         }
         network_queue_clear(con->client->send_queue);
         if (result.detail) {
@@ -2485,7 +2482,7 @@ handle_read_query(network_mysqld_con *con, network_mysqld_con_state_t ostate)
 
     recv_sock->total_output = 0;
 
-    recv_sock->compressed_packet_id = 1;
+    recv_sock->compressed_packet_id = 0;
     recv_sock->do_strict_compress = 0;
 
     con->client->do_query_cache = 0;
@@ -2628,36 +2625,36 @@ process_write_to_server(network_mysqld_con *con, server_session_t *ss, int *writ
     ret = network_mysqld_write(ss->server);
 
     switch (ret) {
-    case NETWORK_SOCKET_SUCCESS:
-        con->num_pending_servers++;
-        con->num_servers_visited++;
-        con->num_read_pending++;
-        ss->read_cal_flag = 0;
-        g_debug("%s:num_read_pending:%d, ss->index:%d, reset 0 for con:%p",
+       case NETWORK_SOCKET_SUCCESS:
+          con->num_pending_servers++;
+          con->num_servers_visited++;
+          con->num_read_pending++;
+          ss->read_cal_flag = 0;
+          g_debug("%s:num_read_pending:%d, ss->index:%d, reset 0 for con:%p",
                 G_STRLOC, con->num_read_pending, ss->index, con);
-        con->num_write_pending--;
-        ss->state = NET_RW_STATE_READ;
-        break;
-    case NETWORK_SOCKET_WAIT_FOR_EVENT:
-        ss->state = NET_RW_STATE_WRITE;
+          con->num_write_pending--;
+          ss->state = NET_RW_STATE_READ;
+          break;
+       case NETWORK_SOCKET_WAIT_FOR_EVENT:
+          ss->state = NET_RW_STATE_WRITE;
 
-        g_debug("%s:write waits for con:%p", G_STRLOC, con);
-        server_sess_wait_for_event(ss, EV_WRITE, &con->write_timeout);
+          g_debug("%s:write waits for con:%p", G_STRLOC, con);
+          server_sess_wait_for_event(ss, EV_WRITE, &con->write_timeout);
 
-        *write_wait = 1;
-        break;
+          *write_wait = 1;
+          break;
 
-    default:
-    {
-        char *msg = "write error";
-        con->state = ST_SEND_QUERY_RESULT;
-        con->server_to_be_closed = 1;
-        con->dist_tran = 0;
-        con->is_client_to_be_closed = 1;
-        g_warning("%s:write error for con:%p, ret:%d", G_STRLOC, con, ret);
-        network_mysqld_con_send_error_full(con->client, L(msg), ER_NET_ERROR_ON_WRITE, "08S01");
-        break;
-    }
+       default:
+          {
+             char *msg = "write error";
+             con->state = ST_SEND_QUERY_RESULT;
+             con->server_to_be_closed = 1;
+             con->dist_tran = 0;
+             con->is_client_to_be_closed = 1;
+             g_warning("%s:write error for con:%p, ret:%d", G_STRLOC, con, ret);
+             network_mysqld_con_send_error_full(con->client, L(msg), ER_NET_ERROR_ON_WRITE, "08S01");
+             break;
+          }
     }
 }
 
@@ -2686,7 +2683,7 @@ process_shard_write(network_mysqld_con *con, int *disp_flag)
         server_session_t *ss = g_ptr_array_index(con->servers, i);
         ss->index = i;
         ss->fresh = 0;
-        ss->server->compressed_packet_id = 0;
+        ss->server->compressed_packet_id = 0xFF;
         ss->server->resp_len = 0;
         ss->server->is_read_finished = 0;
         ss->server->is_waiting = 0;
@@ -2731,45 +2728,52 @@ process_shard_write(network_mysqld_con *con, int *disp_flag)
 static int
 process_rw_write(network_mysqld_con *con, network_mysqld_con_state_t ostate, int *disp_flag)
 {
-    /* Add check for abnormal response processing */
-    if (con->srv->is_fast_stream_enabled && (!con->server->do_compress)) {
-        if (con->server->recv_queue_raw->chunks->length > 0) {
-            g_warning("%s: server raw recv queue has contents:%d for con:%p when writing sql to server",
-                    G_STRLOC, con->server->recv_queue_raw->chunks->length, con);
+    if (!con->server->do_compress || con->server->write_uncomplete == 0) {
+        g_debug("%s: conn:%p, server charset code:%d, charset:%s, client charset code:%d, charset:%s", G_STRLOC, con,
+                con->server->charset_code, con->server->charset->str, con->client->charset_code, con->client->charset->str);
+        /* Add check for abnormal response processing */
+        if (con->srv->is_fast_stream_enabled && (!con->server->do_compress)) {
+            if (con->server->recv_queue_raw->chunks->length > 0) {
+                g_warning("%s: server raw recv queue has contents:%d for con:%p when writing sql to server",
+                        G_STRLOC, con->server->recv_queue_raw->chunks->length, con);
+            }
         }
-    }
 
-    if (con->server->send_queue->offset == 0) {
-        /* only parse the packets once */
-        network_packet packet;
-        GQueue *chunks = con->server->send_queue->chunks;
-        packet.data = g_queue_peek_head(chunks);
-        packet.offset = 0;
+        if (con->server->send_queue->offset == 0) {
+            /* only parse the packets once */
+            network_packet packet;
+            GQueue *chunks = con->server->send_queue->chunks;
+            packet.data = g_queue_peek_head(chunks);
+            packet.offset = 0;
 
-        if (network_mysqld_con_command_states_init(con, &packet)) {
-            g_warning("%s: track mysql proto states failed", G_STRLOC);
-            con->prev_state = con->state;
-            con->state = ST_ERROR;
+            if (network_mysqld_con_command_states_init(con, &packet)) {
+                g_warning("%s: track mysql proto states failed", G_STRLOC);
+                con->prev_state = con->state;
+                con->state = ST_ERROR;
 
-            return DISP_CONTINUE;
+                return DISP_CONTINUE;
+            }
         }
-    }
 
-    con->server->resp_len = 0;
-    con->server->compressed_packet_id = 0;
+        con->server->resp_len = 0;
+        con->server->compressed_packet_id = 0xFF;
 
-    if (con->client->last_packet_id > 0) {
-        g_warning("%s: last packet id:%d for con:%p", G_STRLOC, con->client->last_packet_id, con);
-    }
+        if (con->client->last_packet_id > 0) {
+            g_warning("%s: last packet id:%d for con:%p", G_STRLOC, con->client->last_packet_id, con);
+        }
 
-    if (con->client->send_queue->chunks->length > 0) {
-        g_warning("%s: client-send-queue-len = %d", G_STRLOC, con->client->send_queue->chunks->length);
-    }
+        if (con->client->send_queue->chunks->length > 0) {
+            g_warning("%s: client-send-queue-len = %d", G_STRLOC, con->client->send_queue->chunks->length);
+        }
 
+    } 
+
+    con->server->write_uncomplete = 0;
     switch (network_mysqld_write(con->server)) {
     case NETWORK_SOCKET_SUCCESS:
         break;
     case NETWORK_SOCKET_WAIT_FOR_EVENT:
+        con->server->write_uncomplete = 1;
         g_debug("%s:write wait for con:%p", G_STRLOC, con);
         WAIT_FOR_EVENT(con->server, EV_WRITE, &con->write_timeout);
         *disp_flag = DISP_STOP;
@@ -2783,6 +2787,7 @@ process_rw_write(network_mysqld_con *con, network_mysqld_con_state_t ostate, int
              */
         con->prev_state = con->state;
         con->state = ST_ERROR;
+        con->server_to_be_closed = 1;
         break;
     }
 
@@ -2806,7 +2811,11 @@ process_rw_write(network_mysqld_con *con, network_mysqld_con_state_t ostate, int
         network_mysqld_queue_reset(con->client);
         network_mysqld_queue_reset(con->server);
 
-        con->prepare_stmt_count--;
+        if (con->prepare_stmt_count > 0) {
+            con->prepare_stmt_count--;
+        } else {
+            g_warning("%s: prepare_stmt_count is zero for con:%p", G_STRLOC, con);
+        }
         g_debug("%s: conn:%p, sub, now prepare_stmt_count:%d", G_STRLOC, con, con->prepare_stmt_count);
 
         if (con->prepare_stmt_count == 0) {
@@ -2833,6 +2842,9 @@ handle_send_query_to_servers(network_mysqld_con *con, network_mysqld_con_state_t
     con->analysis_next_pos = 0;
     con->cur_resp_len = 0;
     con->eof_met_cnt = 0;
+    con->eof_last_met = 0;
+    con->fast_stream_last_exec_index = 0;
+    con->fast_stream_need_more = 0;
     con->partically_record_left_cnt = 0;
     con->resp_err_met = 0;
 
@@ -3720,18 +3732,24 @@ fast_analyze_stream(network_mysqld_con *con, network_socket *server, int *send_f
     g_debug("%s: fast_analyze_stream here:%d for con:%p, con->partically_record_left_cnt:%d",
             G_STRLOC, (int) con->last_payload_len, con, (int) con->partically_record_left_cnt);
 
+    int last_eof_cnt = con->eof_met_cnt;
+    GString *last_payload = NULL;
+
     for (chunk = queue->chunks->head; chunk; chunk = chunk->next) {
         GString *s = chunk->data;
+        last_payload = s;
+
         if (con->partically_record_left_cnt) {
             con->partically_record_left_cnt--;
             g_debug("%s: continue  here:%d for con:%p, s->len:%d", G_STRLOC, con->last_payload_len, con, (int) s->len);
+            con->fast_stream_last_exec_index = 1;
             continue;
         }
 
         int diff, packet_len = NET_HEADER_SIZE;
         unsigned char *header, *end;
         int complete_record_len = 0;
-        int last_packet_id = 0;
+        guchar last_packet_id = 0;
 
         if (con->last_payload_len > 0) {
             int aggr_packet_len = con->last_payload_len + s->len;
@@ -3740,6 +3758,7 @@ fast_analyze_stream(network_mysqld_con *con, network_socket *server, int *send_f
                 con->last_payload_len = con->last_payload_len + s->len;
                 con->cur_resp_len += s->len;
                 g_debug("%s: padding here:%d for con:%p", G_STRLOC, con->last_payload_len, con);
+                con->fast_stream_last_exec_index = 2;
                 continue;
             }
         }
@@ -3747,23 +3766,26 @@ fast_analyze_stream(network_mysqld_con *con, network_socket *server, int *send_f
         if (con->analysis_next_pos < con->cur_resp_len) {
             diff = con->cur_resp_len - con->analysis_next_pos;
 
+            guchar pkt_type = 0;
             switch (con->last_payload_len) {
                 case 1:
                     packet_len += ((con->last_payload[0]) | (s->str[0] << 8) | (s->str[1] << 16));
-                    if (s->str[3] == MYSQLD_PACKET_EOF) {
+                    last_packet_id = s->str[2];
+                    pkt_type = s->str[3];
+                    if (pkt_type == MYSQLD_PACKET_EOF) {
                         con->eof_met_cnt++;
-                    } else if (s->str[3] == MYSQLD_PACKET_ERR) {
+                    } else if (pkt_type == MYSQLD_PACKET_ERR) {
                         con->eof_met_cnt++;
                         con->eof_met_cnt++;
                     }
-                    last_packet_id = s->str[2];
                     break;
                 case 2:
                     packet_len += ((con->last_payload[0]) | (con->last_payload[1] << 8) | (s->str[0] << 16));
                     last_packet_id = s->str[1];
-                    if (s->str[2] == MYSQLD_PACKET_EOF) {
+                    pkt_type = s->str[2];
+                    if (pkt_type == MYSQLD_PACKET_EOF) {
                         con->eof_met_cnt++;
-                    } else if (s->str[2] == MYSQLD_PACKET_ERR) {
+                    } else if (pkt_type == MYSQLD_PACKET_ERR) {
                         con->eof_met_cnt++;
                         con->eof_met_cnt++;
                     }
@@ -3771,9 +3793,10 @@ fast_analyze_stream(network_mysqld_con *con, network_socket *server, int *send_f
                 case 3:
                     packet_len += ((con->last_payload[0]) | (con->last_payload[1] << 8) | (con->last_payload[2] << 16));
                     last_packet_id = s->str[0];
-                    if (s->str[1] == MYSQLD_PACKET_EOF) {
+                    pkt_type = s->str[1];
+                    if (pkt_type == MYSQLD_PACKET_EOF) {
                         con->eof_met_cnt++;
-                    } else if (s->str[1] == MYSQLD_PACKET_ERR) {
+                    } else if (pkt_type == MYSQLD_PACKET_ERR) {
                         con->eof_met_cnt++;
                         con->eof_met_cnt++;
                     }
@@ -3781,9 +3804,10 @@ fast_analyze_stream(network_mysqld_con *con, network_socket *server, int *send_f
                 case 4:
                     packet_len += ((con->last_payload[0]) | (con->last_payload[1] << 8) | (con->last_payload[2] << 16));
                     last_packet_id = con->last_payload[3];
-                    if (s->str[0] == MYSQLD_PACKET_EOF) {
+                    pkt_type = s->str[0];
+                    if (pkt_type == MYSQLD_PACKET_EOF) {
                         con->eof_met_cnt++;
-                    } else if (s->str[0] == MYSQLD_PACKET_ERR) {
+                    } else if (pkt_type == MYSQLD_PACKET_ERR) {
                         con->eof_met_cnt++;
                         con->eof_met_cnt++;
                     }
@@ -3805,6 +3829,7 @@ fast_analyze_stream(network_mysqld_con *con, network_socket *server, int *send_f
                 g_debug("%s:continue here:%d for con:%p, packet_len:%d, s->len:%d, cur_resp_len:%d,analysis_next_pos:%d",
                         G_STRLOC, (int) con->last_payload_len, con, packet_len, (int) s->len,
                         (int) con->cur_resp_len, (int) con->analysis_next_pos);
+                con->fast_stream_last_exec_index = 3;
                 continue;
             }
             g_debug("%s:  packet len:%d, last_payload_len:%d, diff:%d for con:%p",
@@ -3818,6 +3843,14 @@ fast_analyze_stream(network_mysqld_con *con, network_socket *server, int *send_f
                 con->last_payload_len = 0;
                 g_debug("%s:continue here:%d for con:%p, cur_resp_len:%d, analysis_next_pos:%d, s->len:%d",
                         G_STRLOC, con->last_payload_len, con, (int) con->cur_resp_len, (int) con->analysis_next_pos, (int) s->len);
+                con->fast_stream_last_exec_index = 4;
+                continue;
+            } else if (header >= (end - NET_HEADER_SIZE)) {
+                con->cur_resp_len += s->len;
+                memcpy(con->last_payload, header, end - header);
+                con->last_payload_len = end - header;
+                g_warning("%s: not enough info, analysis_next_pos:%d, header:%p, end:%p for con:%p, last_payload_len:%d",
+                        G_STRLOC, (int) con->analysis_next_pos, header, end, con, (int) con->last_payload_len);
                 continue;
             }
             packet_len = NET_HEADER_SIZE + ((header[0]) | (header[1] << 8) | (header[2] << 16));
@@ -3836,6 +3869,7 @@ fast_analyze_stream(network_mysqld_con *con, network_socket *server, int *send_f
                 con->cur_resp_len += s->len;
                 con->analysis_next_pos += packet_len;
                 g_debug("%s:continue here:%d for con:%p, s->len:%d, packet_len:%d", G_STRLOC, con->last_payload_len, con, (int) s->len, packet_len);
+                con->fast_stream_last_exec_index = 5;
                 continue;
             }
         }
@@ -3887,6 +3921,14 @@ fast_analyze_stream(network_mysqld_con *con, network_socket *server, int *send_f
                 G_STRLOC, (int) con->cur_resp_len, (int) con->analysis_next_pos,  packet_len, (int) s->len, con);
         if (con->analysis_next_pos != con->cur_resp_len) {
             need_more = TRUE;
+            con->fast_stream_need_more = 1;
+            if (s->len > RECORD_PACKET_LEN) {
+                memcpy(con->record_last_payload, s->str + s->len - RECORD_PACKET_LEN, RECORD_PACKET_LEN);
+                con->last_record_payload_len = RECORD_PACKET_LEN;
+            } else {
+                memcpy(con->record_last_payload, s->str, s->len);
+                con->last_record_payload_len = s->len;
+            }
             int  partially_diff = 0;
             if (complete_record_len > 0) {
                 partially_diff = s->len - complete_record_len;
@@ -3904,7 +3946,23 @@ fast_analyze_stream(network_mysqld_con *con, network_socket *server, int *send_f
             con->partically_record_left_cnt++;
             g_debug("%s: wait more response, analysis_next_pos:%d, cur_resp_len:%d, diff:%d, complete_record_len:%d for con:%p",
                     G_STRLOC, (int) con->analysis_next_pos, (int) con->cur_resp_len, partially_diff, complete_record_len, con);
+            con->fast_stream_last_exec_index = 6;
             break;
+        }
+        con->fast_stream_last_exec_index = 7;
+    }
+
+    if (con->eof_met_cnt != last_eof_cnt) {
+        con->eof_last_met = 1;
+    }
+
+    if (!need_more) {
+        if (last_payload->len > RECORD_PACKET_LEN) {
+            memcpy(con->record_last_payload, last_payload->str + last_payload->len - RECORD_PACKET_LEN, RECORD_PACKET_LEN);
+            con->last_record_payload_len = RECORD_PACKET_LEN;
+        } else {
+            memcpy(con->record_last_payload, last_payload->str, last_payload->len);
+            con->last_record_payload_len = last_payload->len;
         }
     }
 
@@ -3934,7 +3992,7 @@ fast_analyze_stream(network_mysqld_con *con, network_socket *server, int *send_f
     }
 
     if (con->eof_met_cnt > 1 && !need_more) {
-        g_debug("%s: finished true for con:%p", G_STRLOC, con);
+        g_debug("%s: finished true for con:%p, eof_met_cnt:%d", G_STRLOC, con, con->eof_met_cnt);
         return TRUE;
     }
 
@@ -3958,6 +4016,7 @@ network_mysqld_process_select_resp(network_mysqld_con *con, network_socket *serv
         }
 
         queue->len += len;
+        server->recv_queue_raw->len = 0;
         g_message("%s: append raw packets to send queue for con:%p, len:%d, queue len:%d", G_STRLOC, con, len, (int) queue->len);
         network_queue *reserved_queue = server->recv_queue_raw;
         server->recv_queue_raw = server->recv_queue;
@@ -4065,12 +4124,8 @@ network_mysqld_read_rw_resp(network_mysqld_con *con, network_socket *server, int
         }
         ret = network_mysqld_con_get_packet(chas, server);
     } else {
-        ret = network_mysqld_con_get_uncompressed_packet(chas, server);
-        if (ret != NETWORK_SOCKET_SUCCESS) {
-            if (server->recv_queue_uncompress_raw->len == 0) {
-                return ret;
-            }
-        }
+        network_mysqld_con_get_uncompressed_packet(chas, server);
+        ret = network_mysqld_con_get_packet(chas, server);
     }
 
     while (ret == NETWORK_SOCKET_SUCCESS) {
@@ -4087,11 +4142,11 @@ network_mysqld_read_rw_resp(network_mysqld_con *con, network_socket *server, int
                     G_STRLOC, con->client->default_db->str, server->default_db->str);
             if (con->parse.command == COM_QUERY) {
                 network_mysqld_com_query_result_t *query = con->parse.data;
-                if (query->query_status == MYSQLD_PACKET_ERR) {
+                if (query && query->query_status == MYSQLD_PACKET_ERR) {
                     disp_err_packet(con, &packet);
                 }
 
-                if (query->warning_count > 0) {
+                if (query && query->warning_count > 0) {
                     g_debug("%s warning flag from server:%s is met:%s",
                               G_STRLOC, server->dst->name->str, con->orig_sql->str);
                     con->last_warning_met = 1;
@@ -4103,12 +4158,7 @@ network_mysqld_read_rw_resp(network_mysqld_con *con, network_socket *server, int
         ret = network_mysqld_con_get_packet(chas, server);
 
         if (ret == NETWORK_SOCKET_WAIT_FOR_EVENT) {
-            if (server->do_compress) {
-                ret = network_mysqld_con_get_uncompressed_packet(chas, server);
-                if (ret != NETWORK_SOCKET_SUCCESS) {
-                    break;
-                }
-            }
+            break;
         }
     }
 
@@ -4185,7 +4235,7 @@ normal_read_query_result(network_mysqld_con *con, network_mysqld_con_state_t ost
                 }
 
             }
-            if (con->client->send_queue->len > 0) {
+            if (con->candidate_tcp_streamed && !g_queue_is_empty(con->client->send_queue->chunks)) {
                 g_debug("%s: send_part_content_to_client:%p", G_STRLOC, con);
                 send_part_content_to_client(con);
             }
@@ -4201,16 +4251,6 @@ normal_read_query_result(network_mysqld_con *con, network_mysqld_con_state_t ost
 
         switch (plugin_call(srv, con, con->state)) {
         case NETWORK_SOCKET_SUCCESS:
-            /* 
-             * if we don't need the resultset, 
-             * forward it to the client
-             */
-            if (!con->resultset_is_needed) {
-                if (con->client->send_queue->len > 65536) {
-                    con->state = ST_SEND_QUERY_RESULT;
-                    g_warning("%s: send queue len is too big for sock:%p", G_STRLOC, con->client);
-                }
-            }
             break;
         case NETWORK_SOCKET_ERROR:
             /* 
@@ -4939,11 +4979,12 @@ network_mysqld_con_send_resultset(network_socket *con, GPtrArray *fields, GPtrAr
 }
 
 int
-network_mysqld_con_send_current_date(network_socket *con, const char *name)
+network_mysqld_con_send_current_date(network_socket *con, char *name)
 {
-    GPtrArray *fields = g_ptr_array_new_with_free_func((void *)network_mysqld_proto_fielddef_free);
+    GPtrArray *fields = network_mysqld_proto_fielddefs_new();
+
     MYSQL_FIELD *field = network_mysqld_proto_fielddef_new();
-    field->name = g_strdup(name);
+    field->name = name;
     field->type = MYSQL_TYPE_VAR_STRING;
     g_ptr_array_add(fields, field);
 
@@ -4959,8 +5000,10 @@ network_mysqld_con_send_current_date(network_socket *con, const char *name)
     g_ptr_array_add(rows, row);
 
     network_mysqld_con_send_resultset(con, fields, rows);
-    g_ptr_array_free(fields, TRUE);
+
+    network_mysqld_proto_fielddefs_free(fields);
     g_ptr_array_free(rows, TRUE);
+
     return 0;
 }
 
@@ -5265,7 +5308,7 @@ process_self_read_auth_result(server_connection_state_t *con)
     }
 
     GString *packet = g_queue_peek_head(con->server->recv_queue->chunks);
-    int type = packet->str[NET_HEADER_SIZE];
+    guchar type = packet->str[NET_HEADER_SIZE];
     switch (type) {
     case MYSQLD_PACKET_OK:
         break;
@@ -5338,7 +5381,7 @@ process_self_read_query_result(server_connection_state_t *con)
 
     g_debug("%s:after process_self_server_read for con:%p", G_STRLOC, con);
     GString *packet = g_queue_peek_head(con->server->recv_queue->chunks);
-    int type = packet->str[NET_HEADER_SIZE];
+    guchar type = packet->str[NET_HEADER_SIZE];
     switch (type) {
     case MYSQLD_PACKET_OK:
         con->state = ST_ASYNC_OVER;
@@ -5728,7 +5771,7 @@ network_connection_pool_create_conn(network_mysqld_con *con)
             }
 
             scs->backend->connected_clients++;
-            g_message("%s: connected_clients add, backend ndx:%d, for server:%p, faked con:%p",
+            g_debug("%s: connected_clients add, backend ndx:%d, for server:%p, faked con:%p",
                       G_STRLOC, i, scs->server, scs);
 
             switch (network_socket_connect(scs->server)) {
@@ -5819,8 +5862,8 @@ network_connection_pool_create_conns(chassis *srv)
 
                 }
 
-                g_message("%s: connected_clients add, backend ndx:%d, for server:%p, faked con:%p",
-                          G_STRLOC, i, scs->server, scs);
+                g_debug("%s: connected_clients add, backend ndx:%d, for server:%p, faked con:%p, charset:%d",
+                          G_STRLOC, i, scs->server, scs, scs->charset_code);
 
                 scs->backend->connected_clients++;
                 int create_err = 0;

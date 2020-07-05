@@ -360,7 +360,7 @@ mysqld_con_send_sequence(network_mysqld_con *con)
     GPtrArray *fields = network_mysqld_proto_fielddefs_new();
 
     MYSQL_FIELD *field = network_mysqld_proto_fielddef_new();
-    field->name = g_strdup("SEQUENCE");
+    field->name = "SEQUENCE";
     field->type = MYSQL_TYPE_LONGLONG;
     g_ptr_array_add(fields, field);
 
@@ -453,11 +453,11 @@ proxy_generate_shard_explain_packet(network_mysqld_con *con)
     GPtrArray *fields = network_mysqld_proto_fielddefs_new();
 
     MYSQL_FIELD *field1 = network_mysqld_proto_fielddef_new();
-    field1->name = g_strdup("groups");
+    field1->name = "groups";
     field1->type = MYSQL_TYPE_VAR_STRING;
     g_ptr_array_add(fields, field1);
     MYSQL_FIELD *field2 = network_mysqld_proto_fielddef_new();
-    field2->name = g_strdup("sql");
+    field2->name = "sql";
     field2->type = MYSQL_TYPE_VAR_STRING;
     g_ptr_array_add(fields, field2);
 
@@ -713,9 +713,13 @@ proxy_parse_query(network_mysqld_con *con)
                 return PROXY_SEND_RESULT;
             }
             /* forbid force write on slave */
-            if ((context->rw_flag & CF_FORCE_SLAVE) && (context->rw_flag & CF_WRITE)) {
+            if ((context->rw_flag & CF_FORCE_SLAVE) && ((context->rw_flag & CF_WRITE) || con->is_in_transaction)) {
                 g_message("%s Comment usage error. SQL: %s", G_STRLOC, con->orig_sql->str);
-                network_mysqld_con_send_error(con->client, C("Force write on read-only slave"));
+                if (con->is_in_transaction) {
+                    network_mysqld_con_send_error(con->client, C("Force transaction on read-only slave"));
+                } else {
+                    network_mysqld_con_send_error(con->client, C("Force write on read-only slave"));
+                }
                 return PROXY_SEND_RESULT;
             }
 
@@ -984,6 +988,18 @@ before_get_server_list(network_mysqld_con *con)
         }
         con->dist_tran_xa_start_generated = 0;
     }
+
+    if (con->sharding_plan) {
+        if (con->servers == NULL || con->servers->len == 0) {
+            if (con->sharding_plan) {
+                sharding_plan_free(con->sharding_plan);
+                g_debug("%s: call sharding_plan_free here:%p", G_STRLOC, con);
+                con->sharding_plan = NULL;
+            }
+        } else {
+            sharding_plan_free_map(con->sharding_plan);
+        }
+    }
 }
 
 static void
@@ -1159,6 +1175,13 @@ make_first_decision(network_mysqld_con *con, sharding_plan_t *plan, int *rv, int
 
     case USE_PREVIOUS_WARNING_CONN:
         sharding_plan_free(plan);
+        if (con->sharding_plan == NULL) {
+            con->client->is_server_conn_reserved = 0;
+            *disp_flag = PROXY_SEND_RESULT;
+            network_mysqld_con_send_ok_full(con->client, 0, 0, 0, 0);
+            g_debug("%s: origin has no sharding plan yet", G_STRLOC);
+            return 0;
+        }
         if (con->last_warning_met) {
             con->use_all_prev_servers = 1;
             if (con->servers == NULL) {
@@ -1180,6 +1203,14 @@ make_first_decision(network_mysqld_con *con, sharding_plan_t *plan, int *rv, int
         }
         break;
     case USE_PREVIOUS_TRAN_CONNS:
+        if (con->sharding_plan == NULL) {
+            sharding_plan_free(plan);
+            con->client->is_server_conn_reserved = 0;
+            *disp_flag = PROXY_SEND_RESULT;
+            network_mysqld_con_send_ok_full(con->client, 0, 0, 0, 0);
+            g_debug("%s: origin has no sharding plan yet", G_STRLOC);
+            return 0;
+        }
         if (!process_rv_use_previous_tran_conns(con, plan, rv, disp_flag)) {
             return 0;
         }
@@ -1355,7 +1386,6 @@ proxy_get_server_list(network_mysqld_con *con)
     }
 
     con->last_record_updated = 0;
-
     return RET_SUCCESS;
 }
 
@@ -2154,7 +2184,7 @@ NETWORK_MYSQLD_PLUGIN_PROTO(proxy_send_query_result)
 
     if (context->stmt_type == STMT_DROP_DATABASE) {
         network_mysqld_com_query_result_t *com_query = con->parse.data;
-        if (com_query->query_status == MYSQLD_PACKET_OK) {
+        if (com_query && com_query->query_status == MYSQLD_PACKET_OK) {
             if (con->servers != NULL) {
                 int i;
                 for (i = 0; i < con->servers->len; i++) {

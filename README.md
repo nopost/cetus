@@ -4,6 +4,11 @@
 
 Cetus是由C语言开发的关系型数据库MySQL的中间件，主要提供了一个全面的数据库访问代理功能。Cetus连接方式与MySQL基本兼容，应用程序几乎不用修改即可通过Cetus访问数据库，实现了数据库层的水平扩展和高可用。
 
+## 版本选择
+
+生产环境，建议选择最新的[Release版本](https://github.com/cetus-tools/cetus/releases)使用。
+
+
 ## 主要功能特性
 
 Cetus分为读写分离和分库（分表是分库的一种特殊形式）两个版本。
@@ -130,4 +135,8 @@ Cetus分为读写分离和分库（分表是分库的一种特殊形式）两个
 
 ## 反馈
 
-如果您在使用Cetus的过程中发现BUG或者有新的功能需求，请加入QQ群(521824702)进行交流。
+如果您在使用Cetus的过程中发现BUG或者有新的功能需求，欢迎在issue里面提出来。
+
+## 加入Cetus知识星球，享受优质服务
+
+![cetus](https://raw.github.com/cetus-tools/cetus/master/doc/cetus知识星球二维码.png)

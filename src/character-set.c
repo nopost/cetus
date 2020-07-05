@@ -23,8 +23,6 @@
 #include <string.h>
 #include <assert.h>
 
-#define DEFAULT_CHARSET   '\x21'
-
 int
 charset_get_number(const char *name)
 {
@@ -41,12 +39,14 @@ charset_get_number(const char *name)
         "gbk", 0x1c}, {
         "utf8", 0x21}, {
         "utf8mb4", 0x2d}, {
+        "utf8_unicode_ci", 0x21}, {
+        "utf8mb4_unicode_ci", 0x2d}, {
         "binary", 0x3f}
     };
     int map_len = sizeof(map) / sizeof(struct _charset_number_t);
     int i = 0;
     while (i < map_len) {
-        if (strcmp(name, map[i].name) == 0) {
+        if (strcasecmp(name, map[i].name) == 0) {
             return map[i].number;
         }
         ++i;
@@ -57,11 +57,23 @@ charset_get_number(const char *name)
 const char *
 charset_get_name(int number)
 {
-    static const char *charset[64] = {
+    static const char *charset[256] = {
         0, "big5", 0, 0, 0, 0, 0, 0, "latin1", 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, "gb2312", 0, 0, 0, "gbk", 0, 0, 0,
         0, "utf8", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "utf8mb4", 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "binary"
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "binary",
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        "utf8", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        "utf8mb4", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     };
 
     if (number >= (sizeof(charset) / sizeof(charset[0]))) {
